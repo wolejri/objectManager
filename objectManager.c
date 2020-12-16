@@ -1,270 +1,310 @@
-------------------------------------
+//-----------------------------------------
+// NAME: Samuel Idowu 
+// REMARKS: Object Manager
+//
+//-----------------------------------------
 
-#include<stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
+#include <stdio.h>
 #include "ObjectManager.h"
+#include <assert.h>
 
-static void compactState();
-static void checkState();
+void compact();
+// this keeps track of the next reference
+static Ref nextRef = 1;
 
- uchar firstBuffer[MEMORY_SIZE];
- uchar secondBuffer[MEMORY_SIZE];
- uchar *pointerToBuffer = firstBuffer;
+// our buffers.  This is where we allocate memory from.  One of these is always the current buffer.  The other is used for swapping during compaction stage.
+
+static uchar buffer1[MEMORY_SIZE];
+static uchar buffer2[MEMORY_SIZE];
+
+// points to the location of the next available memory location
+static ulong freeSpace = 0;
+
+// this points to the current buffer being used 
+static uchar *currentBuffer = buffer1;
+
+// A index holds the relevent information associated with an allocated block of memory by our memory manager
+typedef struct INDEX inDex;
 
 
+// LinkedList creation for our Index
 
- struct INDEX
+static inDex* indexStart; // start of linked list of index blocks allocated
+static inDex* indexEnd; //end of linkedlist of index blocks allocated 
+static int indexBlocks; // total number of index blocks allocated 
+
+
+// information needed to track our objects in memory
+struct INDEX
 {
-	ulong start;
-	ulong length;
-	ulong count;// count - add reference increments , drop reference decrements count
-	ulong id; 
+  ulong start;;    // where the object starts
+  ulong length;   //  how big is this object?
+  Ref ref;         // the reference used to identify the object
+  int count;       // the number of references to this object
 
-	struct INDEX *next;
-
+  inDex *next;  // pointer to next index block.  Blocks stored in a linked list.
 };
 
-typedef struct INDEX indexNode;
 
-struct INDEXLIST
+//initialize the block pointed to by thePtr
+static void initIndex(inDex * const thePtr, const ulong leng, const ulong addy, const Ref ref, inDex * const theNext)
 {
-	indexNode* first;
-	ulong refCounter;
-	ulong freePointer;
-	
-};
+  assert( leng > 0 );
+  assert( ref >= 0 && ref < nextRef );
+  assert( addy >= 0 && addy < MEMORY_SIZE );
+  
+  thePtr->length = leng;
+  thePtr->start = addy;
+  thePtr->ref = ref;
+  thePtr->next = theNext;
+  
+  thePtr->count = 1;
+}
 
-typedef struct INDEXLIST indexList;
-
-Ref new_Count = 1;
-indexList* newList;
+static inDex *find( const Ref ref )
+{
+  
+  inDex *firstIndex = NULL;
+  inDex *ptr;
+  
+  ptr = indexStart;  //start at the beginning of the linked list and search for node containing reference id ref.
+  while ((ptr != NULL)  && (firstIndex == NULL))
+  {
+    if (ptr->ref == ref)
+    {
+      firstIndex = ptr;
+    }
+    else
+    {
+      ptr=ptr->next;
+    }
+  }
+  
+  return firstIndex;
+  
+}
 
 void initPool()
 {
+  indexStart = NULL;
+  indexEnd = NULL;
+  indexBlocks = 0;
+}
 
-	// LINKEDLIST INITIALISED AND ASSERT FUNCTION TO THAT MEMORY ALLOCATED ISN'T NULL 
-	newList = (indexList*) malloc(sizeof(indexList));
-	assert(newList != NULL);
+/*
 
-	newList->first = NULL;
-	newList->refCounter = 0;
-	newList->freePointer = 0; 
-} 
+ * This function trys to allocate a block of given size from our buffer.
+ * It will fire the garbage collector as required.
+ * We always assume that an insert always creates a new object...
+ * On success it returns the reference number for the block of memory
+ * allocated for the object.
+ * On failure it returns NULL_REF (0) 
 
-Ref insertObject(ulong size)
+ */
+
+Ref insertObject( ulong size )
 {
-	checkState();
+  Ref newReference = NULL_REF;
+  
+  assert( size > 0 );
+  
+  // start by seeing if we need to garbage collect
+  if ( size >= (MEMORY_SIZE-freeSpace) )
+    {
+        compact();
+    }
+  // only add the data if we have space
+  if ( size < (MEMORY_SIZE-freeSpace) )
+  {
 
-	Ref refReturn = NULL_REF;
-	indexNode* newIndex = (indexNode*) malloc(sizeof(indexNode));
-	 assert(newIndex != NULL);
-	if(size >= (MEMORY_SIZE - newList->freePointer))
-	{
-		compactState();
-	}
-
-	if(newList->first == NULL  && (size < (MEMORY_SIZE - (newList-> freePointer))))
-	{	
-		newIndex->start = 0;
-		newIndex->length = size;
-		newIndex->count = 1;
-		newIndex->id = new_Count++;
-		
-		newIndex->next = newList->first;
-		newList->first = newIndex;
-		newList->refCounter++;
-		newList->freePointer = newList->freePointer + size;
-		
-		assert(newList != NULL);
-		assert(newList->first != NULL);
-		assert(newList->refCounter > 0);
-	
-		refReturn = newIndex->id;
-
-	}
-	else if(newList->first != NULL && (size < (MEMORY_SIZE - (newList-> freePointer))))
-	{
-		indexNode* current = newList->first;
-		// assert for current 
-		assert(current != NULL);
-		
-		while(current->next != NULL)
-		{
-			current = current->next;
-		}	
-		
-		newIndex->start = current->start + current->length;
-                newIndex->length = size;
-                newIndex->count = 1;
-                newIndex ->id = new_Count++;
-
-		newIndex->next = current->next;
-		current->next = newIndex;
-		
-		newList->refCounter++;
-		newList->freePointer = newList->freePointer + size;		
-
-		refReturn = newIndex->id;
-	}
-	
-	return refReturn;
-	
+    inDex *ptr = (inDex *)malloc(sizeof(inDex));
+    assert (ptr != NULL);
+    if (ptr != NULL)
+    {
+      newReference = nextRef++;
+      initIndex( ptr, size, freeSpace, newReference, NULL );
+      indexBlocks++;
+      
+      //add block/node to end of list
+      if (indexEnd != NULL)
+      {
+        indexEnd->next = ptr;
+      }  
+      indexEnd = ptr;
+      
+      //there are no blocks allocated.  This is the first one.
+      if (indexBlocks == 1)
+      {
+        indexStart = ptr;
+      }
+      
+      // clear the data in our memory
+      memset( &currentBuffer[freeSpace], 0x00, size );
+      freeSpace += size;
+      
+      assert( freeSpace <= MEMORY_SIZE );
+    }
+    
+  }
+  else
+  {
+    printf( "Unable to successfully complete memory allocation request.\n" );
+  }
+  return newReference;
 }
 
 
+// returns a pointer to the object being requested given by the reference id
 void *retrieveObject( Ref ref )
 {
-	pointerToBuffer = firstBuffer;	
-	assert(ref > 0);
-	checkState();
-	void *pointerToAddressOfReference = NULL;
-	assert(pointerToBuffer != NULL);
-	indexNode* currentIndex = newList->first;
-	while(currentIndex != NULL)
-	{
-
-		if(currentIndex->id == ref)
-		{
-			pointerToAddressOfReference = pointerToBuffer + currentIndex->start;
-		}
-		currentIndex = currentIndex->next;
-	}
-
-	return pointerToAddressOfReference;
-
+    inDex *firstIndex;
+    void *objectToRetrieve;
+  
+  assert( ref >= 0 && ref < nextRef );
+  firstIndex = find(ref);
+  
+  if (firstIndex != NULL)
+  {
+    objectToRetrieve = &currentBuffer[firstIndex->start];
+  }
+  
+  else
+  {
+    objectToRetrieve = NULL;
+  }
+  
+  return objectToRetrieve;
 }
 
-
-void addReference(Ref ref)
+// update our index to indicate that we have another reference to the given object
+void addReference( Ref ref )
 {
-	checkState();
-	assert(ref >= 1);
-	indexNode* currentIndex = newList->first;
-	assert(currentIndex != NULL);
-
-	while(currentIndex != NULL)
-	{
-		if(currentIndex->id == ref)
-		{
-			currentIndex->count++;
-			assert(currentIndex->count >= 0);
-		}
-		currentIndex = currentIndex->next;	
-	}
-
+  inDex *firstIndex;
+ 
+  assert( ref >= 0 && ref < nextRef );
+  firstIndex = find( ref );
+  
+  if (firstIndex != NULL)
+  {
+    firstIndex->count = firstIndex->count + 1;
+  }
 }
-	
 
-
-void dropReference(Ref ref)
+// update our index to indicate that a reference is gone
+void dropReference( Ref ref )
 {
-      checkState();
-      assert(ref >= 1);
-      indexNode* currentIndex = newList->first;
-      assert(currentIndex != NULL);
+    inDex *firstIndex;
+    inDex *current;
+    inDex *previous;
 
-         while(currentIndex != NULL)
-         {       
-                 if(currentIndex->id == ref)
-                 {       
-                         currentIndex->count--;
-			 assert(currentIndex->count >= 0);
-                 }
-		currentIndex = currentIndex->next;
-         }
-	
+    assert( ref >= 0 && ref < nextRef );
+    firstIndex = find( ref );
+
+    if (firstIndex != NULL)
+    {
+        firstIndex->count = firstIndex->count - 1;
+
+        if (firstIndex->count == 0)
+        {
+            //need to remove this node from the list
+            if (firstIndex == indexStart)
+            {
+                indexStart = indexStart->next;
+                free(firstIndex);
+            }
+            else 
+            {
+                previous = indexStart;
+                current = indexStart->next;
+                while (current != firstIndex)
+                {
+                    previous = current;
+                    current = current->next;
+                }
+                //see if it's the last node we are deleting.
+                if (current == indexEnd)
+                {
+                        indexEnd= previous;
+                }
+                previous->next = firstIndex->next;
+        
+                free(firstIndex);
+            }
+      
+            indexBlocks--;
+      
+            if (indexBlocks <= 1)
+            {
+                indexEnd = indexStart;
+            }
+        
+        }
+    }
 }
 
+
+// functions as the garbage collector
+
+void compact()
+{
+    uchar *newBuffer = (currentBuffer==buffer1) ? buffer2 : buffer1;
+    ulong numbObject = 0;
+    ulong totalBytes = freeSpace;
+    freeSpace = 0;
+    inDex* current = indexStart;
+
+    while(current != NULL)
+    {
+        assert( current->start >= 0 && current->start < MEMORY_SIZE );
+        assert( current->length >= 0 && current->length < (MEMORY_SIZE-freeSpace));
+
+        memcpy( &newBuffer[freeSpace], &currentBuffer[current->start], current->length );
+        current->start = freeSpace;
+        freeSpace += current->length;
+        current = current->next;
+        numbObject++;
+    }
+    
+
+
+    printf( "\nGarbage Collector Statistics:\n" );
+    printf( "number of objects in existence: %lu   bytes in use: %lu   freed: %lu\n\n", numbObject, freeSpace, (totalBytes-freeSpace) );
+    currentBuffer = newBuffer;
+
+}
 
 void destroyPool()
 {
-	checkState();
-	assert(newList->first != NULL);
-	
-	indexNode* current = newList->first;
-	while(newList->first != NULL)
-	{	
-		newList->first = newList->first->next;
-		free(current);
-		
-		current = newList->first;
-		newList->refCounter--;
-	
-	}		
-	checkState();
+  //we want to delete all nodes from the linked list.
+  inDex *current;
+  inDex *next;
+  
+  current = indexStart;
+  while (current != NULL)
+  {
+    next = current->next;
+    free(current);
+    current = next;
+  }
+  
+  indexStart = NULL;
+  indexEnd = NULL;
+  indexBlocks = 0;
 }
-
 
 void dumpPool()
 {
-	checkState();
-	indexNode* currentIndex = newList->first;
-	while(currentIndex != NULL)
-	{
-		printf(" This index start %lu is %lu bytes long, and the reference count of  %lu is %lu\n", currentIndex->start, currentIndex->length, currentIndex->id, currentIndex->count);
-		currentIndex = currentIndex->next;
-	}
+    
+  inDex *current;
+  current = indexStart;
+  
+  while (current != NULL)
+  {
+    printf( "reference id = %lu, start address = %lu, number of bytes = %lu, reference count = %d\n", current->ref, current->start, current->length, current->count );
+    current = current->next;
+  }
+  printf( "next available index = %lu\n", freeSpace ); 
 
-}
-
-static void compactState()
-{
-	checkState();
-	indexNode* currentIndex = newList->first;
-	indexNode* previousIndex = NULL;
-	ulong bytesCollected = 0;
-	ulong updatedLength = 0;
-	ulong bytesInUse = newList->freePointer;
-	assert(currentIndex != NULL);
-	uchar*  bufferToTransfer = (pointerToBuffer == firstBuffer) ? secondBuffer : firstBuffer;
-	
-	while(currentIndex != NULL)
-	{
-		if(currentIndex->count == 0 && currentIndex == newList->first)
-		{	
-			bytesCollected = bytesCollected + currentIndex->length;
-			bytesInUse = bytesInUse - currentIndex->length;
-			newList->first = newList->first->next;
-			free(currentIndex);
-			
-			newList->refCounter--;
-			currentIndex = newList->first;
-		}
-		else if(currentIndex->count == 0)
-		{
-			bytesCollected = bytesCollected + currentIndex->length;
-			bytesInUse = bytesInUse - currentIndex->length;
-			previousIndex->next = currentIndex->next;		
-			newList->refCounter--;
-		}
-		else
-		{
-			memcpy(&bufferToTransfer[updatedLength],&pointerToBuffer[currentIndex->start],currentIndex->length);
-			currentIndex->start = updatedLength;
-			updatedLength += currentIndex->length;
-			 
-		}
-		previousIndex = currentIndex;
-		currentIndex = previousIndex->next;
-	}
-	
-
-	
-
-	printf("\nGarbage Collector Statistics:\n");
-	printf("\nNumber of Objects is: %lu\nBytes in Use: %lu\nBytes collected: %lu\n",newList->refCounter,bytesInUse,bytesCollected);
-}
-
-static void checkState()
-{
-	assert(newList != NULL);
-	if(newList->refCounter == 0)
-		assert(newList->first == NULL); 
-	else if(newList->refCounter == 1)
-		assert(newList->first->next == NULL);
-	else
-		assert(newList->first != NULL && newList->first->next != NULL);   
-	
 }
